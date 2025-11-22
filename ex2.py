@@ -3,7 +3,7 @@ import glob
 import numpy as np
 import soundfile as sf
 import librosa
-from typing import Tuple
+from typing import Tuple, Dict, Any, List
 import pathlib as Path
 import matplotlib.pyplot as plt
 import librosa.display
@@ -91,7 +91,7 @@ def task1():
 # PARAMETERS
 # =========================
 # N_FFT: Window size for STFT
-N_FFT = 16384 # Increased for better frequency resolution in analysis
+N_FFT = 4096
 # HOP: Hop length for STFT (frame shift)
 HOP = 256
 # FMIN, FMAX: Frequency band for high-frequency watermark extraction
@@ -111,6 +111,7 @@ MOD_THRESHOLD_HZ = 0.05    # Modulation frequencies above this are considered mo
 # ---------------------------------------
 # PLOT SPECTROGRAM
 # ---------------------------------------
+
 def plot_spectrogram(S_mag: np.ndarray, sr: int, hop: int, output_path: str, title: str):
     """
     Generates, saves, and closes a full magnitude spectrogram plot.
@@ -265,18 +266,14 @@ def classify_audio(f0: float, fm: float, delta_f: float) -> str:
     """
     Classifies the audio into groups based on extracted FM parameters.
     """
-    if f0 > FM_THRESHOLD_HZ:
-        if delta_f > 100.0: # High deviation suggests active FM data encoding
-            return "Group_A_HighFreq_FM"
-        else:
-            return "Group_B_HighFreq_Tone" # Pure tone/low deviation
+    if fm < 0.45:
+        return "Class 1"
+    elif fm >= 0.45 and fm < 0.55:
+        return "Class 2"
     else:
-        if fm > MOD_THRESHOLD_HZ:
-             return "Group_C_LowFreq_Mod" # E.g., tone in audible range with slight modulation
-        else:
-            return "Group_D_LowFreq_Tone" # E.g., simple 1kHz tone or noise
+        return "Class 3"
 
-def reconstruct_watermark(extracted_params: Dict[str, float], n: int, sr: int, ch: int, output_filepath: str):
+def reconstruct_watermark(group_name: str, extracted_params: Dict[str, float], n: int, sr: int, ch: int, output_filepath: str):
     """
     Reconstructs the time-domain watermark based on extracted parameters 
     and saves its spectrogram.
@@ -296,14 +293,13 @@ def reconstruct_watermark(extracted_params: Dict[str, float], n: int, sr: int, c
         # Case 1: Pure tone (f0)
         beta = 0.0
         phase = 2 * np.pi * f0 * t 
-        group_name = "Recon_Tone"
     else:
         # Case 2: FM Modulated Tone
         beta = delta_f / fm
         # Ensure beta is not excessively large due to very small fm values
         beta = np.clip(beta, 0, 100000.0)
         phase = 2 * np.pi * f0 * t + beta * np.sin(2 * np.pi * fm * t)
-        group_name = "Recon_FM"
+
         
     watermark_mono = A_w * np.cos(phase)
     
@@ -316,11 +312,9 @@ def reconstruct_watermark(extracted_params: Dict[str, float], n: int, sr: int, c
     plot_path = os.path.join(PLOTS_DIR, "reconstructed", f"{group_name}_{os.path.basename(output_filepath).replace('.wav', '.png')}")
     plot_spectrogram(S_mag, sr, HOP, plot_path, f"Reconstructed Watermark: {group_name} ({f0:.0f} Hz)")
     
-    # We won't save the reconstructed audio itself, just the visualization.
-    # sf.write(output_filepath, watermark, sr)
 
 
-def task3_analysis():
+def task2():
     """
     Orchestrates the classification, extraction, and reconstruction for Task 3.
     """
@@ -335,7 +329,7 @@ def task3_analysis():
         print(f"No watermarked files found in {TASK2_DIR}.")
         return
 
-    print("=== Task 3: Watermark Classification and Reconstruction ===\n")
+    print("=== Task 2: Watermark Classification and Reconstruction ===\n")
     results: List[Dict[str, Any]] = []
 
     # 2. Extract Parameters and Classify
@@ -375,10 +369,14 @@ def task3_analysis():
     for group_name, group_list in grouped_results.items():
         if not group_list: continue
 
-        # Use the parameters from the first file in the group for reconstruction
+        # --- NEW LOGIC: Calculate Average Parameters for the Group ---
+        avg_f0 = np.mean([res['f0'] for res in group_list])
+        avg_fm = np.mean([res['fm'] for res in group_list])
+        avg_delta_f = np.mean([res['delta_f'] for res in group_list])
+
+        # Use the first file in the group only for length and sample rate (n, sr, ch)
         sample = group_list[0]
         
-        # Estimate properties for reconstruction (requires reading the audio length)
         try:
             audio, sr = sf.read(sample['path'])
         except Exception:
@@ -386,15 +384,16 @@ def task3_analysis():
             
         n, ch = audio.shape if audio.ndim == 2 else (audio.size, 1)
 
-        extracted_params = {'f0': sample['f0'], 'fm': sample['fm'], 'delta_f': sample['delta_f']}
+        # Use the AVERAGED parameters for reconstruction
+        extracted_params = {'f0': avg_f0, 'fm': avg_fm, 'delta_f': avg_delta_f}
         
         # Reconstruct the function and save its spectrogram
-        reconstruct_watermark(
+        reconstruct_watermark(group_name,
             extracted_params, 
             n, sr, ch, 
-            output_filepath=f"reconstructed_{group_name}_{sample['name']}"
+            output_filepath=f"reconstructed_avg_{group_name}_{sample['name']}"
         )
-        print(f"[RECON] Saved spectrogram for reconstructed function from {group_name}")
+        print(f"[RECON] Saved spectrogram for reconstructed function from {group_name} using average parameters.")
 
 # ---------------------------------------
 # TASK 3
@@ -441,39 +440,10 @@ def task3():
 # MAIN EXECUTION
 # ---------------------------------------
 def main():
-    # """
-    # Locates watermarked files in TASK2_DIR and prints the extracted f0, fm, and delta_f.
-    # It also ensures the plot output directory exists.
-    # """
-    # # Create plots directory if it doesn't exist
-    # # Using os.makedirs is more reliable than pathlib.Path in some environments
-    # try:
-    #     os.makedirs(PLOTS_DIR, exist_ok=True)
-    # except Exception as e:
-    #     print(f"Error creating directory {PLOTS_DIR}: {e}")
-    #     print("Please ensure you have write permissions for the target directory.")
-    #     return
     
-    # # Use glob to find all files ending in _watermarked.wav inside the directory
-    # search_path = os.path.join(TASK2_DIR, "*_watermarked.wav")
-    # files = sorted(glob.glob(search_path))
+    task1()  # Call task1 to generate watermarked audio files
     
-    # if not files:
-    #     print(f"No watermarked files found in {TASK2_DIR}. Please ensure the path is correct.")
-    #     return
-
-    # print("=== Extracted f0, fm, and Delta_f for all files ===\n")
-    # print("{:<25} {:>10} {:>10} {:>10}".format("File", "f0 (Hz)", "fm (Hz)", "Df (Hz)"))
-    # print("-" * 55)
-
-    # for path in files:
-    #     f0, fm, delta_f = extract_parameters(path) 
-    #     name = os.path.basename(path)
-    #     print("{:<25} {:>10.1f} {:>10.3f} {:>10.2f}".format(name, f0, fm, delta_f))
-        
-    # print(f"\nAll spectrograms saved to the '{PLOTS_DIR}' directory.")
-    
-    # task1()  # Call task1 to generate watermarks
+    task2()  # Call task2_analysis to perform classification and reconstruction
     
     task3()  # Call task3 to generate plots for task 3
 
